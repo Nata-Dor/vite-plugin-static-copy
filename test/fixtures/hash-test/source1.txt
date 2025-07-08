@@ -1,0 +1,3 @@
+This is the original content for hash testing.
+It has multiple lines to ensure a meaningful hash.
+Line 3 of the file.

@@ -12,37 +12,7 @@ import type { Logger } from 'vite'
 import type { FileMap } from './serve'
 import { createHash } from 'node:crypto'
 import pMap from 'p-map'
-
-const calculateFileHash = async (filePath: string): Promise<string> => {
-  try {
-    const content = await fs.readFile(filePath)
-    return createHash('md5').update(content).digest('hex')
-  } catch {
-    return ''
-  }
-}
-
-const shouldSkipCopy = async (
-  srcPath: string,
-  destPath: string,
-): Promise<boolean> => {
-  try {
-    // Check if destination file exists
-    await fs.access(destPath)
-    
-    // Both files exist, compare their hashes
-    const [srcHash, destHash] = await Promise.all([
-      calculateFileHash(srcPath),
-      calculateFileHash(destPath),
-    ])
-    
-    // Skip copy if hashes are equal (files are identical)
-    return srcHash === destHash && srcHash !== ''
-  } catch {
-    // Destination doesn't exist, proceed with copy
-    return false
-  }
-}
+import { createReadStream } from 'node:fs'
 
 export type SimpleTarget = {
   src: string
@@ -312,6 +282,64 @@ export async function getTransformedContent(
   return transform.handler(content, file)
 }
 
+const calculateFileHash = async (filePath: string): Promise<string | null> => {
+  try {
+    // Use streaming for memory efficiency with large files
+    const hash = createHash('md5')
+    const stream = createReadStream(filePath)
+    
+    for await (const chunk of stream) {
+      hash.update(chunk)
+    }
+    
+    return hash.digest('hex')
+  } catch {
+    return null
+  }
+}
+
+const getFileSize = async (filePath: string): Promise<number | null> => {
+  try {
+    const stats = await fs.stat(filePath)
+    return stats.size
+  } catch {
+    return null
+  }
+}
+
+const shouldSkipCopy = async (
+  srcPath: string,
+  destPath: string,
+): Promise<boolean> => {
+  try {
+    // Check if destination file exists
+    await fs.access(destPath)
+    
+    // Quick size comparison first (optimization)
+    const [srcSize, destSize] = await Promise.all([
+      getFileSize(srcPath),
+      getFileSize(destPath),
+    ])
+    
+    // If sizes are different, files are definitely different
+    if (srcSize === null || destSize === null || srcSize !== destSize) {
+      return false
+    }
+    
+    // Sizes are equal, now compare hashes
+    const [srcHash, destHash] = await Promise.all([
+      calculateFileHash(srcPath),
+      calculateFileHash(destPath),
+    ])
+    
+    // Skip copy only if both hashes calculated successfully and are equal
+    return srcHash !== null && destHash !== null && srcHash === destHash
+  } catch {
+    // Destination doesn't exist, proceed with copy
+    return false
+  }
+}
+
 async function transformCopy(
   transform: TransformOptionObject,
   src: string,
@@ -389,18 +417,36 @@ export const copyAll = async (
             copiedCount++
           }
         } else {
-          // Check if we should skip copying due to identical content
-          const shouldSkip = await shouldSkipCopy(resolvedSrc, resolvedDest)
-          if (shouldSkip) {
-            // File already exists with identical content, skip copy
-            continue
+          // Handle overwrite scenarios
+          if (overwrite === false || overwrite === 'error') {
+            const exists = await fsExists(resolvedDest)
+            if (exists) {
+              if (overwrite === false) {
+                // skip copy
+                continue
+              }
+              if (overwrite === 'error') {
+                throw new Error(`File ${resolvedDest} already exists`)
+              }
+            }
           }
+          
+          // Check if we should skip copying due to identical content (only when overwrite is true)
+          if (overwrite === true) {
+            const shouldSkip = await shouldSkipCopy(resolvedSrc, resolvedDest)
+            if (shouldSkip) {
+              continue
+            }
+          }
+
+          // Ensure destination directory exists before copying
+          await fs.ensureDir(path.dirname(resolvedDest))
 
           await fs.copy(resolvedSrc, resolvedDest, {
             preserveTimestamps,
             dereference,
-            overwrite: overwrite === true,
-            errorOnExist: overwrite === 'error',
+            overwrite: true,
+            errorOnExist: false,
           })
           copiedCount++
         }
