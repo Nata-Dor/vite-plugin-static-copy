@@ -13,6 +13,37 @@ import type { FileMap } from './serve'
 import { createHash } from 'node:crypto'
 import pMap from 'p-map'
 
+const calculateFileHash = async (filePath: string): Promise<string> => {
+  try {
+    const content = await fs.readFile(filePath)
+    return createHash('md5').update(content).digest('hex')
+  } catch {
+    return ''
+  }
+}
+
+const shouldSkipCopy = async (
+  srcPath: string,
+  destPath: string,
+): Promise<boolean> => {
+  try {
+    // Check if destination file exists
+    await fs.access(destPath)
+    
+    // Both files exist, compare their hashes
+    const [srcHash, destHash] = await Promise.all([
+      calculateFileHash(srcPath),
+      calculateFileHash(destPath),
+    ])
+    
+    // Skip copy if hashes are equal (files are identical)
+    return srcHash === destHash && srcHash !== ''
+  } catch {
+    // Destination doesn't exist, proceed with copy
+    return false
+  }
+}
+
 export type SimpleTarget = {
   src: string
   dest: string
@@ -358,6 +389,13 @@ export const copyAll = async (
             copiedCount++
           }
         } else {
+          // Check if we should skip copying due to identical content
+          const shouldSkip = await shouldSkipCopy(resolvedSrc, resolvedDest)
+          if (shouldSkip) {
+            // File already exists with identical content, skip copy
+            continue
+          }
+
           await fs.copy(resolvedSrc, resolvedDest, {
             preserveTimestamps,
             dereference,
